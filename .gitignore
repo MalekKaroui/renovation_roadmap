@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.gpkg
+data/permits_cleaned.csv
+data/permits_spatial.gpkg
+data/permits_kmeans.gpkg
+data/permits_dbscan.gpkg
