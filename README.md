@@ -1,4 +1,3 @@
-```markdown
 # The Renovation Roadmap
 
 **Predicting early signs of gentrification in Saint John, New Brunswick using building permit data**
@@ -19,9 +18,8 @@ The project asks:
 
 The strongest result from the project is the **Investment-Assessment Ratio (IAR)**:
 
-```text
+
 IAR = mean permit value / mean assessed property value
-```
 
 Using that metric, I identified:
 
@@ -77,7 +75,7 @@ Main methods:
 
 ## Repository Structure
 
-```text
+
 renovation_roadmap/
 ├── src/                    # Python source files
 ├── data/                   # Processed datasets
@@ -86,7 +84,6 @@ renovation_roadmap/
 ├── dashboard.py / src/     # Streamlit dashboard
 ├── requirements.txt
 └── final_report.tex / pdf
-```
 
 ## How to Run
 
