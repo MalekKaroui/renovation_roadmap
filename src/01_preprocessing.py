@@ -1,146 +1,225 @@
 """
-01_preprocessing.py — Data cleaning (FIXED coordinate columns)
+01_preprocessing.py
+
+Clean and prepare the raw Saint John building permit data for analysis.
+
+This script:
+- loads the raw CSV,
+- parses permit dates,
+- filters the analysis period,
+- fixes coordinates,
+- removes invalid valuations and duplicates,
+- and saves a cleaned CSV for later stages.
 """
-import pandas as pd
-import numpy as np
+
+import os
+import sys
+
 import matplotlib.pyplot as plt
-import sys, os
+import numpy as np
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(__file__))
+
 from utils import logger, data_path, save_figure, style_axis
+
 
 RAW_CSV = data_path("Building_Permits.csv")
 OUT_CSV = data_path("permits_cleaned.csv")
 
-def load_raw():
-    for enc in ("utf-8", "latin-1"):
-        try:
-            df = pd.read_csv(RAW_CSV, encoding=enc, low_memory=False)
-            logger.info(f"Loaded {len(df):,} raw permits ({enc})")
-            return df
-        except:
-            continue
-    raise ValueError(f"Cannot read {RAW_CSV}")
+YEAR_MIN = 2015
+YEAR_MAX = 2025
 
-def parse_dates(df):
-    """Parse BPPISD (Permit Issue Date) — format: YYMMDD integer"""
+# Approximate Saint John bounding box in WGS84
+LON_MIN = -66.2
+LON_MAX = -65.8
+LAT_MIN = 45.1
+LAT_MAX = 45.5
+
+
+def load_raw_data():
+    """
+    Load the raw permit CSV using a fallback encoding strategy.
+    """
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            df = pd.read_csv(RAW_CSV, encoding=encoding, low_memory=False)
+            logger.info(f"Loaded {len(df):,} raw permits ({encoding})")
+            return df
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError(f"Could not read {RAW_CSV} with supported encodings.")
+
+
+def parse_permit_dates(df):
+    """
+    Convert BPPISD from YYMMDD integer format into a pandas datetime column.
+    """
     df["BPPISD"] = pd.to_numeric(df["BPPISD"], errors="coerce")
-    
-    def parse_yymmdd(x):
-        if pd.isna(x) or x == 0:
+
+    def parse_yymmdd(value):
+        if pd.isna(value) or value == 0:
             return pd.NaT
-        s = str(int(x)).zfill(6)
-        yy, mm, dd = s[:2], s[2:4], s[4:6]
+
+        text = str(int(value)).zfill(6)
+        yy, mm, dd = text[:2], text[2:4], text[4:6]
+
         year = 1900 + int(yy) if int(yy) > 50 else 2000 + int(yy)
+
         try:
             return pd.Timestamp(year=year, month=int(mm), day=int(dd))
-        except:
+        except ValueError:
             return pd.NaT
-    
+
     df["BPISDT"] = df["BPPISD"].apply(parse_yymmdd)
     df["YEAR"] = df["BPISDT"].dt.year
-    
+
     before = len(df)
-    df = df.dropna(subset=["BPISDT"])
+    df = df.dropna(subset=["BPISDT"]).copy()
     logger.info(f"Date parsing: {before - len(df):,} invalid dates dropped")
+
     return df
 
-def filter_years(df, year_min=2015, year_max=2025):
+
+def filter_analysis_years(df, year_min=YEAR_MIN, year_max=YEAR_MAX):
+    """
+    Keep only permits issued between year_min and year_max.
+    """
     before = len(df)
     df = df[(df["YEAR"] >= year_min) & (df["YEAR"] <= year_max)].copy()
     logger.info(f"Year filter ({year_min}-{year_max}): {before:,} → {len(df):,}")
     return df
 
+
 def clean_coordinates(df):
     """
-    FIX: Use X_Long_East (longitude) and Y_Lat_North (latitude)
-    These are the ACTUAL WGS84 coordinates in your CSV
+    Use the correct longitude/latitude columns and remove invalid points.
     """
-    # Try both column name variants
     lon_col = "X_Long_East" if "X_Long_East" in df.columns else "POINT_X"
     lat_col = "Y_Lat_North" if "Y_Lat_North" in df.columns else "POINT_Y"
-    
+
     df["POINT_X"] = pd.to_numeric(df[lon_col], errors="coerce")
     df["POINT_Y"] = pd.to_numeric(df[lat_col], errors="coerce")
-    
-    # Saint John bounding box
-    valid = (
-        df["POINT_X"].between(-66.2, -65.8) &
-        df["POINT_Y"].between(45.1, 45.5)
+
+    valid_mask = (
+        df["POINT_X"].between(LON_MIN, LON_MAX) &
+        df["POINT_Y"].between(LAT_MIN, LAT_MAX)
     )
-    
-    n_invalid = (~valid).sum()
-    logger.info(f"Coordinates: {n_invalid:,} invalid/missing, {valid.sum():,} valid")
-    return df[valid].copy()
+
+    invalid_count = (~valid_mask).sum()
+    valid_count = valid_mask.sum()
+
+    logger.info(
+        f"Coordinates: {invalid_count:,} invalid/missing, {valid_count:,} valid"
+    )
+
+    return df[valid_mask].copy()
+
 
 def clean_valuations(df):
-    """BPEVAL = project valuation in CAD"""
+    """
+    Remove missing, zero, and extreme permit valuations.
+    Uses the 1st and 99th percentiles as cutoffs.
+    """
     df["BPEVAL"] = pd.to_numeric(df["BPEVAL"], errors="coerce")
     before = len(df)
-    
-    # Remove zeros and NaNs
+
     df = df[df["BPEVAL"] > 0].copy()
-    
-    # Remove extreme outliers (keep 1st to 99th percentile)
-    p01 = df["BPEVAL"].quantile(0.01)
-    p99 = df["BPEVAL"].quantile(0.99)
-    df = df[(df["BPEVAL"] >= p01) & (df["BPEVAL"] <= p99)].copy()
-    
+
+    lower = df["BPEVAL"].quantile(0.01)
+    upper = df["BPEVAL"].quantile(0.99)
+
+    df = df[(df["BPEVAL"] >= lower) & (df["BPEVAL"] <= upper)].copy()
+
     logger.info(f"Valuation cleaning: {before - len(df):,} dropped")
     return df
 
-def remove_duplicates(df):
+
+def remove_duplicate_permits(df):
+    """
+    Remove duplicate permits using address, date, and valuation.
+    """
     before = len(df)
-    # Use street name + date + value as duplicate key
-    subset = ["ENCIVSTNAM", "BPISDT", "BPEVAL"]
-    subset = [c for c in subset if c in df.columns]
-    if subset:
-        df = df.drop_duplicates(subset=subset)
+
+    duplicate_keys = ["ENCIVSTNAM", "BPISDT", "BPEVAL"]
+    duplicate_keys = [col for col in duplicate_keys if col in df.columns]
+
+    if duplicate_keys:
+        df = df.drop_duplicates(subset=duplicate_keys).copy()
+
     logger.info(f"Duplicates removed: {before - len(df):,}")
     return df
 
-def plot_valuation_dist(df):
+
+def plot_valuation_distribution(df):
+    """
+    Save a histogram of log-transformed permit values.
+    """
     fig, ax = plt.subplots(figsize=(9, 4))
-    log_vals = np.log10(df["BPEVAL"].clip(1))
-    ax.hist(log_vals, bins=60, color="#2196F3", edgecolor="white", alpha=0.85)
-    style_axis(ax, "Project Valuation Distribution (log₁₀ CAD)", 
-               "log₁₀(BPEVAL)", "Count")
+
+    log_values = np.log10(df["BPEVAL"].clip(lower=1))
+    ax.hist(log_values, bins=60, color="#2196F3", edgecolor="white", alpha=0.85)
+
+    style_axis(
+        ax,
+        "Project Valuation Distribution (log₁₀ CAD)",
+        "log₁₀(BPEVAL)",
+        "Count"
+    )
     save_figure(fig, "01_valuation_distribution.png")
 
+
 def plot_permits_per_year(df):
-    counts = df.groupby("YEAR").size()
+    """
+    Save a bar chart showing permit counts by year.
+    """
+    yearly_counts = df.groupby("YEAR").size()
+
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(counts.index, counts.values, color="#4CAF50", edgecolor="white")
+    ax.bar(yearly_counts.index, yearly_counts.values, color="#4CAF50", edgecolor="white")
+
     style_axis(ax, "Permits Issued per Year", "Year", "Number of Permits")
     save_figure(fig, "01_permits_per_year.png")
 
+
+def print_summary_stats(df):
+    """
+    Print a short summary of the cleaned permit dataset.
+    """
+    print("\n" + "=" * 60)
+    print(f"Mean permit value: ${df['BPEVAL'].mean():,.0f}")
+    print(f"Median permit value: ${df['BPEVAL'].median():,.0f}")
+    print(f"Total investment: ${df['BPEVAL'].sum():,.0f}")
+
+
 def main():
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("STAGE 1 — Data Preprocessing")
-    logger.info("="*60)
-    
-    df = load_raw()
-    df = parse_dates(df)
-    df = filter_years(df)
+    logger.info("=" * 60)
+
+    df = load_raw_data()
+    df = parse_permit_dates(df)
+    df = filter_analysis_years(df)
     df = clean_coordinates(df)
     df = clean_valuations(df)
-    df = remove_duplicates(df)
-    
+    df = remove_duplicate_permits(df)
+
     logger.info(f"Final cleaned dataset: {len(df):,} records")
-    
-    if len(df) > 0:
-        plot_valuation_dist(df)
-        plot_permits_per_year(df)
-        
+
+    if len(df) == 0:
+        logger.error("No valid records remained after cleaning.")
         df.to_csv(OUT_CSV, index=False)
-        logger.info(f"Saved → {OUT_CSV}")
-        
-        print("\n" + "="*60)
-        print(f"Mean permit value: ${df['BPEVAL'].mean():,.0f}")
-        print(f"Median permit value: ${df['BPEVAL'].median():,.0f}")
-        print(f"Total investment: ${df['BPEVAL'].sum():,.0f}")
-    else:
-        logger.error("NO VALID RECORDS after cleaning — check your data!")
-        df.to_csv(OUT_CSV, index=False)  # Save empty file to prevent downstream errors
+        return
+
+    plot_valuation_distribution(df)
+    plot_permits_per_year(df)
+
+    df.to_csv(OUT_CSV, index=False)
+    logger.info(f"Saved → {OUT_CSV}")
+
+    print_summary_stats(df)
+
 
 if __name__ == "__main__":
     main()
